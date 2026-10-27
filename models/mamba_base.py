@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from timm.models.layers import DropPath
-from pscan import pscan
+from .pscan import pscan
 
 @dataclass
 class MambaConfig:

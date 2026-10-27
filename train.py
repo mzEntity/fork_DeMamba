@@ -12,7 +12,7 @@ from torch.optim.lr_scheduler import StepLR, LambdaLR, MultiStepLR
 
 def get_arguments():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', dest='config', help='settings of detector in yaml format')
+    parser.add_argument('--config', dest='config', required=True, help='settings of detector in yaml format')
     args = parser.parse_args()
 
     return args
@@ -22,9 +22,19 @@ if __name__ == '__main__':
     args = get_arguments()
     assert (os.path.exists(args.config))
     cfg = yaml.load(open(args.config, 'r'), Loader=yaml.Loader)
+    required_config = {'dataset', 'model', 'pretrained_model_path'}
+    if cfg['dataset'] == 'AIGVDBench':
+        required_config.update({
+            'aigvdbench_data_root', 'aigvdbench_meta_root',
+            'aigvdbench_train_split', 'aigvdbench_val_split',
+            'aigvdbench_train_sources', 'aigvdbench_val_sources',
+        })
+    missing_config = sorted(key for key in required_config if key not in cfg or cfg[key] is None)
+    if missing_config:
+        raise ValueError('Missing required configuration keys: ' + ', '.join(missing_config))
     print("******* Building models. *******")
     print(cfg)
-    model = util.build_model(cfg['model'])
+    model = util.build_model(cfg)
     model = model.cuda()
 
     if cfg['tuning_mode'] == 'lp':

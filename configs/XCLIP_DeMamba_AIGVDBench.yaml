@@ -1,0 +1,24 @@
+dataset: 'AIGVDBench'
+aigvdbench_data_root: '/root/misk1024/AIGVDBench'
+aigvdbench_meta_root: '/root/misk1024/AIGVDBench_meta'
+aigvdbench_train_split: 'train'
+aigvdbench_val_split: 'val'
+aigvdbench_train_sources:
+  - 'real/real'
+  - 'fake/T2V_Open-Sora'
+aigvdbench_val_sources:
+  - 'real/real'
+  - 'fake/T2V_Open-Sora'
+
+model: 'XCLIP_DeMamba'
+pretrained_model_path: '/root/workspace/xclip-base-patch16'
+tuning_mode: 'sft'
+
+save_dir: './results/XCLIP_DeMamba_AIGVDBench_OpenSora'
+
+max_epoch: 10
+
+train_batch_size: 8
+val_batch_size: 8
+num_workers: 8
+lr: 0.000001

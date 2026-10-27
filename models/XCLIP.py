@@ -1,4 +1,4 @@
-from transformers import XCLIPVisionModel
+from transformers import AutoModel
 import os
 import sys
 import numpy as np
@@ -12,11 +12,24 @@ import math
 from transformers import XCLIPVisionModel
 class XCLIP(nn.Module):
     def __init__(
-        self, channel_size=512, dropout=0.2, class_num=1
+        self, pretrained_model_path
     ):
         super(XCLIP, self).__init__()
       
-        self.backbone = XCLIPVisionModel.from_pretrained("GenVideo/pretrained_weights/xclip")
+        xclip_model, loading_info = AutoModel.from_pretrained(
+            pretrained_model_path, output_loading_info=True
+        )
+        self.backbone = xclip_model.vision_model if hasattr(xclip_model, 'vision_model') else xclip_model
+        vision_prefix = 'vision_model.' if hasattr(xclip_model, 'vision_model') else ''
+        missing_vision_weights = [
+            key for key in loading_info['missing_keys']
+            if key.startswith(vision_prefix)
+        ]
+        if missing_vision_weights:
+            raise RuntimeError(
+                "The checkpoint did not load X-CLIP vision weights. Missing keys include: "
+                + ', '.join(missing_vision_weights[:10])
+            )
         self.fc_norm = nn.LayerNorm(768)
         self.head = nn.Linear(768, 1)
 

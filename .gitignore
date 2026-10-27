@@ -1,0 +1,41 @@
+# Python bytecode and tool caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local Python environments and credentials
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+
+# Downloaded datasets and pretrained weights
+/GenVideo/
+/AIGVDBench/
+/AIGVDBench_meta/
+/pretrained_weights/
+*.pth
+*.pt
+*.ckpt
+
+# Training outputs
+/results/
+/runs/
+/lightning_logs/
+
+# Preprocessing outputs
+/SD_frames/
+/SD.csv
+/compressed_videos/
+
+# Editor and operating system files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

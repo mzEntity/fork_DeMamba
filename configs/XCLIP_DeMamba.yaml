@@ -1,4 +1,6 @@
+dataset: 'GenVideo'
 model: 'XCLIP_DeMamba'
+pretrained_model_path: './GenVideo/pretrained_weights/xclip'
 tuning_mode: 'sft'
 task: 'many2many'
 

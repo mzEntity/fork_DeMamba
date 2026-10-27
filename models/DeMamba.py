@@ -1,4 +1,4 @@
-from transformers import XCLIPVisionModel
+from transformers import AutoModel
 import os
 import sys
 import numpy as np
@@ -6,9 +6,8 @@ import torch
 import torchvision
 import torch.nn as nn
 import torch.nn.functional as F
-from mamba_base import MambaConfig, ResidualBlock
+from .mamba_base import MambaConfig, ResidualBlock
 import torch.nn.init as init
-from clip import clip
 import math
 
 def create_reorder_index(N, device):
@@ -31,10 +30,23 @@ def reorder_data(data, N):
 
 class XCLIP_DeMamba(nn.Module):
     def __init__(
-        self, channel_size=768, class_num=1
+        self, pretrained_model_path, channel_size=768, class_num=1
     ):
         super(XCLIP_DeMamba, self).__init__()
-        self.encoder = XCLIPVisionModel.from_pretrained("GenVideo/pretrained_weights/xclip")
+        xclip_model, loading_info = AutoModel.from_pretrained(
+            pretrained_model_path, output_loading_info=True
+        )
+        self.encoder = xclip_model.vision_model if hasattr(xclip_model, 'vision_model') else xclip_model
+        vision_prefix = 'vision_model.' if hasattr(xclip_model, 'vision_model') else ''
+        missing_vision_weights = [
+            key for key in loading_info['missing_keys']
+            if key.startswith(vision_prefix)
+        ]
+        if missing_vision_weights:
+            raise RuntimeError(
+                "The checkpoint did not load X-CLIP vision weights. Missing keys include: "
+                + ', '.join(missing_vision_weights[:10])
+            )
         blocks = []
         channel = 768
         self.fusing_ratios = 1
@@ -102,6 +114,8 @@ class CLIP_DeMamba(nn.Module):
         self, channel_size=512, class_num=1
     ):
         super(CLIP_DeMamba, self).__init__()
+        from .clip import clip
+
         self.clip_model, preprocess = clip.load('ViT-B-14')
         self.clip_model = self.clip_model.float()
         blocks = []
