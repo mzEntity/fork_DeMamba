@@ -18,7 +18,7 @@ save_dir: './results/XCLIP_DeMamba_AIGVDBench_OpenSora'
 
 max_epoch: 10
 
-train_batch_size: 16
-val_batch_size: 16
-num_workers: 16
+train_batch_size: 8
+val_batch_size: 8
+num_workers: 4
 lr: 0.000001

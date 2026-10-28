@@ -238,6 +238,19 @@ python train.py --config configs/XCLIP_DeMamba_AIGVDBench.yaml
 
 ## 8. 常见运行问题
 
+### 导出 AIGVDBench 全部 test split 的逐视频分数
+
+训练配置 `configs/XCLIP_DeMamba_AIGVDBench.yaml` 只用于训练和验证；推理使用单独的 `configs/XCLIP_DeMamba_AIGVDBench_test.yaml`。测试配置独立设置测试数据路径、test split、`test_batch_size`、`test_num_workers`、设备和输出目录，不读取训练/验证 batch size。
+
+```bash
+python test_aigvdbench.py \
+  --config configs/XCLIP_DeMamba_AIGVDBench_test.yaml
+```
+
+checkpoint 在测试配置的 `checkpoints` 列表中指定，可添加多个权重。脚本只遍历测试集并读取每个视频一次，然后将同一批帧送入各 checkpoint 对应的模型；每个 checkpoint 单独生成一个 `test_predictions_<checkpoint文件名>.csv`，写入 `test_output_dir`。测试脚本的唯一命令行参数是配置文件路径；测试 batch size、worker 数、设备、checkpoint 和输出目录都由测试 YAML 控制。`fake_score` 是模型 sigmoid 输出，`real_score` 为 `1 - fake_score`。`source` 保留 `real/<来源>` 或 `fake/<来源>`，`actual_result` 由测试集元数据标签生成。设备设为 `auto` 时会优先使用 CUDA。所有 checkpoint 的模型会同时驻留设备以避免重复解码，因此显存占用会随 checkpoint 数量增加；若显存不足，可在测试配置中暂时缩短 checkpoint 列表分批运行。
+
+遇到视频解码异常时，脚本会跳过包含该视频的整个 batch，继续测试后续 batch，并把跳过的 batch 和错误详情写入 `test_output_dir/test_skipped_batches.txt`。因此 CSV 不包含被跳过 batch 中的视频。
+
 1. **找不到模型权重**：检查配置里的 `pretrained_model_path` 是否指向有效的本地权重目录或 Hugging Face 模型 ID。
 2. **找不到 GenVideo CSV 或帧文件**：确认从仓库根目录启动，并检查 `GenVideo/datasets/` 下对应任务的 CSV 与数据路径。
 3. **`download_oss_file` 未定义**：需补充 OSS 访问实现或替换为本地读取实现；此功能当前不在仓库中。

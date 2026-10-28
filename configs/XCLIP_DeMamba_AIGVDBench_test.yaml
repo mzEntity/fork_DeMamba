@@ -1,0 +1,17 @@
+# Inference-only settings. Keep training hyperparameters in the training YAML.
+dataset: 'AIGVDBench'
+aigvdbench_data_root: '/root/misk1024/AIGVDBench'
+aigvdbench_meta_root: '/root/misk1024/AIGVDBench_meta'
+aigvdbench_test_split: 'test'
+
+model: 'XCLIP_DeMamba'
+pretrained_model_path: '/root/misk1024/models/xclip-base-patch16'
+
+checkpoints:
+  - './results/XCLIP_DeMamba_AIGVDBench_OpenSora/Epoch_5.pth'
+  - './results/XCLIP_DeMamba_AIGVDBench_OpenSora/Epoch_10.pth'
+
+test_batch_size: 4
+test_num_workers: 4
+test_device: 'auto'
+test_output_dir: './results/XCLIP_DeMamba_AIGVDBench_OpenSora'
