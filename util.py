@@ -7,6 +7,22 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import f1_score, accuracy_score, recall_score, precision_score, average_precision_score, roc_auc_score
 
+# Old checkpoints have identical tensor shapes but incompatible temporal semantics.
+PIPELINE_VERSION = 'temporal_blocks_v2'
+
+def checkpoint_accuracy(cfg, video_ids, predictions, labels):
+    sources = cfg.get('aigvdbench_checkpoint_sources')
+    if cfg['dataset'] != 'AIGVDBench' or sources is None:
+        return accuracy_score(labels, predictions)
+    if not isinstance(sources, list) or not sources:
+        raise ValueError('aigvdbench_checkpoint_sources must be a non-empty list')
+    groups = ['/'.join(str(path).split('/')[1:-1]) for path in video_ids]
+    missing = set(sources) - set(groups)
+    if missing:
+        raise ValueError(f'Checkpoint selection sources absent from validation: {sorted(missing)}')
+    mask = np.asarray([group in sources for group in groups])
+    return accuracy_score(np.asarray(labels)[mask], np.asarray(predictions)[mask])
+
 def build_model(cfg):
     model_name = cfg['model']
     if model_name == 'F3Net':
@@ -56,7 +72,7 @@ def eval_model(cfg, model, val_loader, loss_ce, val_batch_size):
     outpred = np.concatenate(outpred_list, 0)
     gt_label = np.concatenate(gt_label_list, 0)
     video_list = np.concatenate(video_list, 0)
-    pred_labels = [1 if item > 0.5 else 0 for item in outpred]
+    pred_labels = [1 if item >= 0.5 else 0 for item in outpred]
     true_labels = np.argmax(gt_label, axis=1)
 
     pred_accuracy = accuracy_score(true_labels, pred_labels)
@@ -68,7 +84,7 @@ def train_one_epoch(cfg, model, loss_ce, scheduler, optimizer, epochID, max_epoc
     trainLoss = 0
     lossTrainNorm = 0
 
-    scheduler.step()
+    ss_time = time.time()
     pbar = tqdm(train_loader, total=len(train_loader), desc=f"Training epoch {epochID + 1}")
     for batchID, (index, input, target, binary_label) in enumerate(pbar):
         if batchID == 0:
@@ -91,23 +107,25 @@ def train_one_epoch(cfg, model, loss_ce, scheduler, optimizer, epochID, max_epoc
         del lossvalue
 
     trainLoss = trainLoss / lossTrainNorm
+    scheduler.step()
     
     if (epochID+1) % 1 == 0:
         pred_accuracy, video_id, pred_labels, true_labels, outpred = eval_model(cfg, model, val_loader, loss_ce, cfg['val_batch_size'])    
+        selection_accuracy = checkpoint_accuracy(cfg, video_id, pred_labels, true_labels)
 
         torch.save(
-            {"epoch": epochID + 1, "model_state_dict": model.state_dict()},
+            {"epoch": epochID + 1, "model_state_dict": model.state_dict(), "pipeline_version": PIPELINE_VERSION, "config": cfg},
             snapshot_path + "/last"+ ".pth",
             )
         torch.save(
-            {"epoch": epochID + 1, "model_state_dict": model.state_dict()},
+            {"epoch": epochID + 1, "model_state_dict": model.state_dict(), "pipeline_version": PIPELINE_VERSION, "config": cfg},
             snapshot_path + "/Epoch_" + str(epochID + 1) + ".pth",
         )
 
-        if pred_accuracy > max_acc:
-            max_epoch, max_acc = epochID, pred_accuracy
+        if selection_accuracy > max_acc:
+            max_epoch, max_acc = epochID, selection_accuracy
             torch.save(
-            {"epoch": epochID + 1, "model_state_dict": model.state_dict()},
+            {"epoch": epochID + 1, "model_state_dict": model.state_dict(), "pipeline_version": PIPELINE_VERSION, "config": cfg},
             snapshot_path + "/best_acc"+ ".pth",
             )
 
@@ -117,6 +135,7 @@ def train_one_epoch(cfg, model, loss_ce, scheduler, optimizer, epochID, max_epoc
             'actual_label': true_labels,
             'predicted_prob':outpred
         })
+        df_result.to_csv(snapshot_path + f'/Epoch_{epochID + 1}_predictions.csv', index=False)
 
         temp_result_txt = snapshot_path+'/Epoch_'+str(epochID + 1)+'_accuracy.txt'
         with open(temp_result_txt, 'w') as file:
@@ -125,8 +144,15 @@ def train_one_epoch(cfg, model, loss_ce, scheduler, optimizer, epochID, max_epoc
             auc = roc_auc_score(true_labels, pred_probs)
             ap = average_precision_score(true_labels, pred_probs)
             file.write(f"总正确率: {pred_accuracy:.2%}\n")
+            file.write(f"Checkpoint selection accuracy: {selection_accuracy:.6f}\n")
+            file.write(f"Checkpoint selection sources: {cfg.get('aigvdbench_checkpoint_sources', 'all')}\n")
             file.write(f"AUC是: {auc:.2%}\n")
             file.write(f"AP是: {ap:.2%}\n")
+            for label, name in ((0, 'Real'), (1, 'Fake')):
+                mask = true_labels == label
+                recall = (df_result.loc[mask, 'predicted_label'] == label).mean()
+                file.write(f"{name} Recall: {recall:.6f}\n")
+            file.write(f"Predicted Fake fraction: {(df_result['predicted_label'] == 1).mean():.6f}\n")
 
         if cfg['dataset'] == 'GenVideo':
             prefixes = ["fake/ModelScope", "fake/Morph", "fake/MoonValley",
@@ -171,11 +197,21 @@ def train_one_epoch(cfg, model, loss_ce, scheduler, optimizer, epochID, max_epoc
             with open(temp_result_txt, 'a') as file:
                 for source_name, source_df in df_result.groupby(source):
                     accuracy = (source_df['predicted_label'] == source_df['actual_label']).mean()
-                    file.write(f"来源: {source_name}, Accuracy: {accuracy:.4f}\n")
+                    line = f"来源: {source_name}, N: {len(source_df)}, Accuracy/Recall: {accuracy:.4f}"
+                    # A single fake source contains only positives; evaluate its
+                    # ranking against the common real validation set.
+                    if (source_df['actual_label'] == 1).all():
+                        paired = pd.concat([source_df, df_result[df_result['actual_label'] == 0]])
+                        if paired['actual_label'].nunique() == 2:
+                            source_auc = roc_auc_score(paired['actual_label'], paired['predicted_prob'])
+                            source_ap = average_precision_score(paired['actual_label'], paired['predicted_prob'])
+                            line += f", AUC(vs Real): {source_auc:.6f}, AP(vs Real): {source_ap:.6f}"
+                    file.write(line + '\n')
+                    print(line)
 
         print("*****Average Training loss",str(trainLoss),"*****\n")
         print("*****Epoch", str(epochID), "*****Acc ", str(pred_accuracy), '*****',
-            '\n', "*****Max acc epoch", str(max_epoch), "*****Acc ", str(max_acc), '*****\n')
+            '\n', "*****Best selection epoch", str(max_epoch + 1), "*****Selection Acc ", str(max_acc), '*****\n')
     end_time = time.time()
 
     return max_epoch, max_acc, end_time - ss_time

@@ -7,6 +7,7 @@ import torchvision
 import torch.nn as nn
 import torch.nn.functional as F
 from .mamba_base import MambaConfig, ResidualBlock
+from .temporal import temporal_blocks
 import torch.nn.init as init
 import math
 
@@ -85,15 +86,9 @@ class XCLIP_DeMamba(nn.Module):
         global_feat = self.fc_norm2(global_feat)
 
         sequence_output = sequence_output.view(b, t, -1, c)
-        _, _, f_w, _ = sequence_output.shape
-        f_h, f_w = int(math.sqrt(f_w)), int(math.sqrt(f_w))
 
-        s = f_h//self.fusing_ratios
-        sequence_output = sequence_output.view(b, t, self.fusing_ratios, s, self.fusing_ratios, s, c)
-        x = sequence_output.permute(0, 2, 4, 1, 3, 5, 6).contiguous().view(b*s*s, t, -1, c)
-        b_l = b*s*s
-        
-        x = reorder_data(x, self.fusing_ratios)
+        x = temporal_blocks(sequence_output, self.fusing_ratios)
+        b_l = x.shape[0]
         x = x.permute(0, 2, 1, 3).contiguous().view(b_l, -1, c)
         res = self.mamba(x)
 
@@ -152,15 +147,8 @@ class CLIP_DeMamba(nn.Module):
         global_feat = sequence_output.reshape(b, -1, c)
         global_feat = global_feat.mean(1)
 
-        _, _, f_w, _ = sequence_output.shape
-        f_h, f_w = int(math.sqrt(f_w)), int(math.sqrt(f_w))
-
-        s = f_h//self.fusing_ratios
-        sequence_output = sequence_output.view(b, t, self.fusing_ratios, s, self.fusing_ratios, s, c)
-        x = sequence_output.permute(0, 2, 4, 1, 3, 5, 6).contiguous().view(b*s*s, t, -1, c)
-        b_l = b*s*s
-        
-        x = reorder_data(x, self.fusing_ratios)
+        x = temporal_blocks(sequence_output, self.fusing_ratios)
+        b_l = x.shape[0]
         x = x.permute(0, 2, 1, 3).contiguous().view(b_l, -1, c)
         res = self.mamba(x)
         video_level_features = res.mean(1)

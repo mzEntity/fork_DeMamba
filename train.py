@@ -1,4 +1,5 @@
 import random
+import numpy as np
 import argparse
 import yaml
 import torch
@@ -32,6 +33,11 @@ if __name__ == '__main__':
     missing_config = sorted(key for key in required_config if key not in cfg or cfg[key] is None)
     if missing_config:
         raise ValueError('Missing required configuration keys: ' + ', '.join(missing_config))
+    seed = int(cfg.get('seed', 42))
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
     print("******* Building models. *******")
     print(cfg)
     model = util.build_model(cfg)
@@ -51,8 +57,10 @@ if __name__ == '__main__':
     snapshot_path = cfg['save_dir']
     if not os.path.exists(snapshot_path):
         os.makedirs(snapshot_path)
+    with open(os.path.join(snapshot_path, 'config.yaml'), 'w') as stream:
+        yaml.safe_dump(cfg, stream, sort_keys=False)
 
-    max_epoch, max_acc = 0, 0
+    max_epoch, max_acc = 0, -1
 
     for epochID in range(0, trMaxEpoch):
         print("******* Training epoch", str(epochID)," *******")
@@ -60,4 +68,3 @@ if __name__ == '__main__':
         train_loader, val_loader = generate_dataset_loader(cfg)
         max_epoch, max_acc, epoch_time = train_one_epoch(cfg, model, loss, scheduler, optimizer, epochID, max_epoch, max_acc, train_loader, val_loader, snapshot_path)
         print("******* Ending epoch", str(epochID)," Time ", str(epoch_time), "*******")
-

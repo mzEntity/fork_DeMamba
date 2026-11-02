@@ -60,6 +60,11 @@ def main():
         checkpoint_path = Path(checkpoint_path)
         model = util.build_model(cfg).to(device)
         checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        if checkpoint.get('pipeline_version') != util.PIPELINE_VERSION:
+            raise ValueError(
+                f"{checkpoint_path} was not trained with the corrected temporal pipeline. "
+                "Retrain with the current train.py; old weights cannot be evaluated with this layout."
+            )
         state = checkpoint.get("model_state_dict", checkpoint)
         try:
             model.load_state_dict(state)

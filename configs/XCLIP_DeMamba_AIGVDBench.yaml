@@ -6,7 +6,9 @@ aigvdbench_val_split: 'val'
 aigvdbench_train_sources:
   - 'real/real'
   - 'fake/T2V_Open-Sora'
-aigvdbench_val_sources:
+aigvdbench_val_sources: 'all'
+# Other validation sources are monitoring-only, not checkpoint selection data.
+aigvdbench_checkpoint_sources:
   - 'real/real'
   - 'fake/T2V_Open-Sora'
 
@@ -14,7 +16,9 @@ model: 'XCLIP_DeMamba'
 pretrained_model_path: '/root/misk1024/models/xclip-base-patch16'
 tuning_mode: 'sft'
 
-save_dir: './results/XCLIP_DeMamba_AIGVDBench_OpenSora'
+save_dir: './results/XCLIP_DeMamba_AIGVDBench_OpenSora_v2'
+seed: 42
+train_augment: true
 
 max_epoch: 10
 

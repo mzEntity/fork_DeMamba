@@ -45,6 +45,9 @@ def _collect_records(data_root, meta_root, split, sources):
             label = entry["label"]
             if not filename or label not in (0, 1):
                 continue
+            expected_label = {'real': 0, 'fake': 1}.get(relative_group.parts[0])
+            if expected_label is not None and label != expected_label:
+                raise ValueError(f"Label/source mismatch in {meta_path}: {filename}, label={label}")
 
             video_path = Path(data_root) / split / relative_group / filename
             if not video_path.is_file():
@@ -71,17 +74,19 @@ def _collect_records(data_root, meta_root, split, sources):
 
 
 def _sample_indices(frame_count, count, training):
-    if training:
-        if frame_count >= count:
-            start = random.randint(0, frame_count - count)
-            return list(range(start, start + count))
-        return sorted(random.choices(range(frame_count), k=count))
-    if frame_count >= 2:
+    """Cover the whole clip in both modes; jitter only within temporal bins."""
+    if frame_count < 1 or count < 1:
+        raise ValueError("frame_count and count must be positive")
+    if frame_count < count:
         return np.linspace(0, frame_count - 1, num=count).round().astype(int).tolist()
-    return [0] * count
+    edges = [i * frame_count // count for i in range(count + 1)]
+    return [
+        random.randrange(start, stop) if training else (start + stop - 1) // 2
+        for start, stop in zip(edges[:-1], edges[1:])
+    ]
 
 
-def _read_video_frames(path, training):
+def _read_video_frames(path, training, augment=False):
     capture = cv2.VideoCapture(path)
     if not capture.isOpened():
         raise RuntimeError(f"OpenCV could not open video: {path}")
@@ -92,6 +97,9 @@ def _read_video_frames(path, training):
         raise RuntimeError(f"Video has no readable frames: {path}")
 
     indices = _sample_indices(video_frame_count, NUM_FRAMES, training)
+    # Share augmentation parameters across frames to preserve temporal consistency.
+    flip = training and augment and random.random() < 0.5
+    jpeg_quality = random.randint(75, 100) if training and augment and random.random() < 0.5 else None
     frames = []
     for frame_index in indices:
         capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
@@ -100,8 +108,16 @@ def _read_video_frames(path, training):
             capture.release()
             raise RuntimeError(f"Could not decode frame {frame_index} from {path}")
 
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         frame = cv2.resize(frame, (IMAGE_SIZE, IMAGE_SIZE), interpolation=cv2.INTER_LINEAR)
+        if flip:
+            frame = cv2.flip(frame, 1)
+        if jpeg_quality is not None:
+            ok, encoded = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
+            if not ok:
+                capture.release()
+                raise RuntimeError(f"Could not augment video: {path}")
+            frame = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         frame = frame.astype(np.float32) / 255.0
         frame = (frame - IMAGE_MEAN) / IMAGE_STD
         frames.append(torch.from_numpy(frame.transpose(2, 0, 1).copy()))
@@ -113,16 +129,17 @@ def _read_video_frames(path, training):
 class AIGVDBenchDataset(Dataset):
     """Return the tensor/label contract consumed by train.py and util.py."""
 
-    def __init__(self, records, training):
+    def __init__(self, records, training, augment=False):
         self.records = records
         self.training = training
+        self.augment = augment
 
     def __len__(self):
         return len(self.records)
 
     def __getitem__(self, index):
         record = self.records[index]
-        frames = _read_video_frames(record["path"], self.training)
+        frames = _read_video_frames(record["path"], self.training, self.augment)
         video = frames.unsqueeze(0)  # [1, T, C, H, W]
 
         label = record["label"]
@@ -151,7 +168,7 @@ def generate_dataset_loader(cfg):
 
     workers = int(cfg["num_workers"])
     train_loader = DataLoader(
-        AIGVDBenchDataset(train_records, training=True),
+        AIGVDBenchDataset(train_records, training=True, augment=cfg.get('train_augment', False)),
         batch_size=int(cfg["train_batch_size"]),
         shuffle=True,
         num_workers=workers,

@@ -226,7 +226,25 @@ return index, video, label_onehot, binary_label, video_id
 /root/misk1024/AIGVDBench_meta
 ```
 
-其预期目录组织是 `AIGVDBench/<split>/<real|fake>/<来源>/<视频>.mp4`，元信息是 `AIGVDBench_meta/<split>/<real|fake>/<来源>.json`。适配器按 `train` split 训练、`val` split 验证；`test` split 当前不参与训练入口的验证。当前训练配置只选 `real/real` 和 `fake/T2V_Open-Sora` 两个训练 source。两类各 14,000 个样本，训练集共 28,000 个视频，每个 epoch 会遍历全部样本，最后一个不足整批的 batch 也会保留。验证也只使用 `real/real` 和 `fake/T2V_Open-Sora`。训练视频随机取连续 8 帧，验证视频均匀取 8 帧，缩放到 `224×224` 并按 ImageNet 均值/方差归一化。
+其预期目录组织是 `AIGVDBench/<split>/<real|fake>/<来源>/<视频>.mp4`，元信息是 `AIGVDBench_meta/<split>/<real|fake>/<来源>.json`。适配器按 `train` split 训练、`val` split 验证；`test` split 不参与训练入口的验证。当前训练配置只选 `real/real` 和 `fake/T2V_Open-Sora` 两个训练 source。两类各 14,000 个样本，训练集共 28,000 个视频，每个 epoch 遍历全部样本，最后一个不足整批的 batch 也会保留。验证使用 `val` split 全部来源，以观察跨域表现；仅 `real/real` 和 `fake/T2V_Open-Sora` 的准确率参与 checkpoint 选择。训练、验证和测试均将视频分为 8 个时间段：训练在各段内随机取一帧，评估取各段中间帧；不足 8 帧时均匀重复已有帧。图像缩放到 `224×224` 并按本地 X-CLIP 预处理配置相同的 ImageNet 均值/方差归一化。
+
+### 修正版 baseline（v2）
+
+- 修正 Mamba 输入的空间/时间排列，使每个空间块沿时间形成序列。
+- `seed: 42` 固定 Python、NumPy 和 PyTorch 随机种子；不承诺不同硬件上的逐位一致。
+- `train_augment: true` 启用随机水平翻转和 JPEG 压缩（质量 75–100），各以 50% 概率应用。同一视频所有帧共享增强参数，验证和测试不增强。设为 `false` 可做消融。
+- 标签始终为 `0=Real, 1=Fake`，加载时检查标签与来源目录一致。sigmoid 分数 `>=0.5` 判为 Fake。
+- 输出目录为 `results/XCLIP_DeMamba_AIGVDBench_OpenSora_v2`。训练保存配置、每轮预测 CSV、分类别召回率和预测 Fake 比例；学习率调度在 epoch 训练完成后执行。
+- 测试默认使用 Open-Sora＋Real 验证准确率选出的 `best_acc.pth`，准确率并列时保留较早轮次。不能根据 test 分数选择 checkpoint。
+- **必须重新训练。** 新 checkpoint 含 `pipeline_version` 标识，测试拒绝旧版本权重，防止相同参数形状掩盖时空语义变化。
+
+此配置是 Open-Sora 单来源训练、全来源验证监控、同来源 checkpoint 选择、全部来源测试。`aigvdbench_val_sources: all` 控制监控范围，`aigvdbench_checkpoint_sources` 独立限定选择最佳权重的来源。每轮在控制台和结果 TXT 中报告各来源样本数与召回率，并将每个 Fake 来源和 Real 配对计算 AUC/AP。跨域指标仅供观察，不参与梯度、学习率或 checkpoint 选择；全来源验证耗时会增加。与其他方法比较时应保持划分、训练来源和选择 checkpoint 的规则一致，并披露上述预处理与增强。修正不保证跨生成器泛化提升；同来源验证准确率也不代表未见来源效果。
+
+回归检查（需要 PyTorch、OpenCV 和 NumPy）：
+
+```bash
+python -m unittest discover -s tests -v
+```
 
 使用单独配置启动：
 
