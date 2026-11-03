@@ -1,33 +1,11 @@
 import torch.utils.data as data
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 import pandas as pd
 import torch
-import albumentations
 import random
-import os
-import numpy as np
-import cv2
-import math
-import warnings
 
+from .video_processing import crop_center_by_percentage, prepare_clip
 
-def crop_center_by_percentage(image, percentage):
-    height, width = image.shape[:2]
-
-    if width > height:
-        left_pixels = int(width * percentage)
-        right_pixels = int(width * percentage)
-        start_x = left_pixels
-        end_x = width - right_pixels
-        cropped_image = image[:, start_x:end_x]
-    else:
-        up_pixels = int(height * percentage)
-        down_pixels = int(height * percentage)
-        start_y = up_pixels
-        end_y = height - down_pixels
-        cropped_image = image[start_y:end_y, :]
-
-    return cropped_image
 
 class Ours_Dataset_train(Dataset):
     def __init__(self, index_list=None, df=None):
@@ -53,64 +31,12 @@ class Ours_Dataset_train(Dataset):
         label = row['label']
         frame_list = eval(row['frame_seq'])
         label_onehot = [0]*2
-        select_frame_nums = 8
-
-        aug_list  = [
-                    albumentations.Resize(224, 224)
-                    ]
-
-        if random.random() < 0.5:
-            aug_list.append(albumentations.HorizontalFlip(p=1.0))
-        if random.random() < 0.5:
-            quality_score = random.randint(50, 100)
-            aug_list.append(albumentations.ImageCompression(quality_lower=quality_score, quality_upper=quality_score))
-        if random.random() < 0.3:
-            aug_list.append(albumentations.GaussNoise(p=1.0))
-        if random.random() < 0.3:
-            aug_list.append(albumentations.GaussianBlur(blur_limit=(3, 5), p=1.0))
-        if random.random() < 0.001:
-            aug_list.append(albumentations.ToGray(p=1.0))
-            
-        aug_list.append(albumentations.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225), max_pixel_value=255.0, p=1.0))
-        trans = albumentations.Compose(aug_list)
-
-        if len(frame_list) >= select_frame_nums:
-            start_frame = random.randint(0, len(frame_list)-select_frame_nums)
-            select_frames = frame_list[start_frame:start_frame+select_frame_nums]
-            frames = []
-            for x in frame_list[start_frame:start_frame+select_frame_nums]:
-                while True:
-                    try:
-                        temp_image_path = video_id+'/'+str(x)+'.jpg'
-                        image = download_oss_file('GenVideo/'+ temp_image_path)
-                        if video_id.startswith("real/youku"):
-                            image = crop_center_by_percentage(image, 0.15)
-                        break
-                    except Exception as e:
-                        if x+1 < len(frame_list):
-                            x = x + 1
-                        elif x - 1 >=0 :
-                            x = x - 1
-                augmented = trans(image=image)
-                image = augmented["image"]
-                frames.append(image.transpose(2,0,1)[np.newaxis,:])
-        else:
-            pad_num = select_frame_nums-len(frame_list)
-            frames = []
-            for x in frame_list:
-                temp_image_path = video_id+'/'+str(x)+'.jpg'
-                image = download_oss_file('GenVideo/'+temp_image_path)
-                if video_id.startswith("real/youku"):
-                    image = crop_center_by_percentage(image, 0.15)
-                augmented = trans(image=image)
-                image = augmented["image"]
-                frames.append(image.transpose(2,0,1)[np.newaxis,:])    
-            for i in range(pad_num):
-                frames.append(np.zeros((224,224,3)).transpose(2,0,1)[np.newaxis,:])
-        
+        frames = prepare_clip(
+            len(frame_list),
+            lambda i: download_oss_file('GenVideo/' + video_id + '/' + str(frame_list[i]) + '.jpg'),
+            training=True, video_id=video_id,
+        ).unsqueeze(0)
         label_onehot[int(label)] = 1
-        frames = np.concatenate(frames, 0)
-        frames = torch.tensor(frames[np.newaxis,:])
         label_onehot = torch.FloatTensor(label_onehot)
         binary_label = torch.FloatTensor([int(label)])
 
@@ -128,83 +54,18 @@ class Ours_Dataset_val(data.Dataset):
         self.frame_dir = df['image_path'].tolist()
 
     def __getitem__(self, idx):
-        aug_list  = [
-                    albumentations.Resize(224, 224),
-                    ]
-        
-        if self.cfg['task'] == 'JPEG_Compress_Attack':
-            aug_list.append(albumentations.JpegCompression(quality_lower=35, quality_upper=35,p=1.0))
-        if self.cfg['task'] == 'FLIP_Attack':
-            if random.random() < 0.5:
-                aug_list.append(albumentations.HorizontalFlip(p=1.0))
-            else:
-                aug_list.append(albumentations.VerticalFlip(p=1.0))
-        if self.cfg['task'] == 'CROP_Attack':
-            random_crop_x = random.randint(0, 16)  
-            random_crop_y = random.randint(0, 16)  
-            crop_width = random.randint(160, 208) 
-            crop_height = random.randint(160, 208)
-            aug_list.append(albumentations.Crop(x_min=random_crop_x, y_min=random_crop_y, x_max=random_crop_x+crop_width, y_max=random_crop_y+crop_height))
-            aug_list.append(albumentations.Resize(224, 224))
-
-        if self.cfg['task'] == 'Color_Attack':
-            index = random.choice([i for i in range(4)])
-            dicts = {0:[0.5,0,0,0],1:[0,0.5,0,0],2:[0,0,0.5,0],3:[0,0,0,0.5]}
-            brightness,contrast,saturation,hue = dicts[index]
-            aug_list.append(albumentations.ColorJitter(
-                brightness=brightness, contrast=contrast, saturation=saturation, hue=hue))
-
-        if self.cfg['task'] == 'Gaussian_Attack':     
-            aug_list.append(albumentations.GaussianBlur(blur_limit=(7, 7), p=1.0))
-
-        aug_list.append(albumentations.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225), max_pixel_value=255.0, p=1.0))
-        trans = albumentations.Compose(aug_list)
-
-
         df_v = self.df.loc[self.index_list[idx]]
         video_id = df_v['content_path']
-        activity_id = df_v['activity_id']
         label = df_v['label']
         label_onehot = [0]*2
         frame_list = eval(df_v['frame_seq'])
 
-        select_frame_nums = 8
-
-        if len(frame_list) >= select_frame_nums:
-            start_frame = random.randint(0, len(frame_list)-select_frame_nums)
-            select_frames = frame_list[start_frame:start_frame+select_frame_nums]
-            frames = []
-            for x in frame_list[start_frame:start_frame+select_frame_nums]:
-                while True:
-                    try:
-                        temp_image_path = video_id+'/'+str(x)+'.jpg'
-                        image = download_oss_file('GenVideo/'+ temp_image_path)
-                        image = crop_center_by_percentage(image, 0.1)
-                        break
-                    except Exception as e:
-                        if x+1 < len(frame_list):
-                            x = x + 1
-                        elif x - 1 >=0 :
-                            x = x - 1
-                augmented = trans(image=image)
-                image = augmented["image"]
-                frames.append(image.transpose(2,0,1)[np.newaxis,:])
-        else:
-            pad_num = select_frame_nums-len(frame_list)
-            frames = []
-            for x in frame_list:
-                temp_image_path = video_id+'/'+str(x)+'.jpg'
-                image = download_oss_file('GenVideo/'+temp_image_path)
-                image = crop_center_by_percentage(image, 0.1)
-                augmented = trans(image=image)
-                image = augmented["image"]
-                frames.append(image.transpose(2,0,1)[np.newaxis,:])    
-            for i in range(pad_num):
-                frames.append(np.zeros((224,224,3)).transpose(2,0,1)[np.newaxis,:])
-
+        frames = prepare_clip(
+            len(frame_list),
+            lambda i: download_oss_file('GenVideo/' + video_id + '/' + str(frame_list[i]) + '.jpg'),
+            training=False, video_id=video_id, task=self.cfg['task'],
+        ).unsqueeze(0)
         label_onehot[int(label)] = 1
-        frames = np.concatenate(frames, 0)
-        frames = torch.tensor(frames[np.newaxis,:])
         label_onehot = torch.FloatTensor(label_onehot)
         binary_label = torch.FloatTensor([int(label)])
         return self.index_list[idx], frames, label_onehot, binary_label, video_id

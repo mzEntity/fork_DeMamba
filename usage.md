@@ -70,7 +70,7 @@ GenVideo/real/mydata/clip001/2.jpg
 GenVideo/real/mydata/clip001/3.jpg
 ```
 
-`content_path` 应是相对标识，不要再包含对象前缀。每个视频的帧放在同名子目录中，文件名用帧编号加 `.jpg`；编号需要与 `frame_seq` 完全一致。帧数、输入尺寸和归一化参数由 `num_frames`、`image_size`、`image_mean`、`image_std` 控制；当前配置从每个样本取 8 帧并缩放到 `224×224`。
+`content_path` 应是相对标识，不要再包含对象前缀。每个视频的帧放在同名子目录中，文件名用帧编号加 `.jpg`；编号需要与 `frame_seq` 完全一致。帧数、输入尺寸和归一化参数由 `dataloader/video_processing.py` 统一定义；当前从每个样本取 8 帧并缩放到 `224×224`。
 
 目录示例：
 
@@ -226,24 +226,20 @@ return index, video, label_onehot, binary_label, video_id
 /root/misk1024/AIGVDBench_meta
 ```
 
-其预期目录组织是 `AIGVDBench/<split>/<real|fake>/<来源>/<视频>.mp4`，元信息是 `AIGVDBench_meta/<split>/<real|fake>/<来源>.json`。适配器按 `train` split 训练、`val` split 验证；`test` split 不参与训练入口的验证。当前训练配置只选 `real/real` 和 `fake/T2V_Open-Sora` 两个训练 source。两类各 14,000 个样本，训练集共 28,000 个视频，每个 epoch 遍历全部样本，最后一个不足整批的 batch 也会保留。验证使用 `val` split 全部来源，以观察跨域表现；仅 `real/real` 和 `fake/T2V_Open-Sora` 的准确率参与 checkpoint 选择。训练、验证和测试均将视频分为 8 个时间段：训练在各段内随机取一帧，评估取各段中间帧；不足 8 帧时均匀重复已有帧。图像缩放到 `224×224` 并按本地 X-CLIP 预处理配置相同的 ImageNet 均值/方差归一化。
+其预期目录组织是 `AIGVDBench/<split>/<real|fake>/<来源>/<视频>.mp4`，元信息是 `AIGVDBench_meta/<split>/<real|fake>/<来源>.json`。适配器按 `train` split 训练；当前配置在每轮训练后使用 `test` split 全部来源进行评估。当前训练配置只选 `real/real` 和 `fake/T2V_Open-Sora` 两个训练 source。两类各 14,000 个样本，训练集共 28,000 个视频，每个 epoch 会遍历全部样本，最后一个不足整批的 batch 也会保留。评估使用 `aigvdbench_val_split: test` 和 `aigvdbench_val_sources: all`，并设置 `save_best_checkpoint: false`，不根据评估集选择最佳权重。两个数据集共用 `dataloader/video_processing.py` 的处理策略：
 
-### 修正版 baseline（v2）
+- GenVideo 读取已有的预提取 JPG 帧序列；AIGVDBench 直接读取视频，不生成本地 JPG。
+- AIGVDBench 用 `总帧数 / FPS` 估计时长。时长 ≥ 4 秒时按 2 FPS 构造虚拟帧序列；不足 4 秒时按 `ceil(8 / 时长)` FPS 构造。虚拟时间点映射到最近的原视频帧（半数向上取整），超过末帧时截到末帧。低帧率视频可能重复同一原帧，这对应预提帧阶段的升帧率。
+- 训练、验证和测试均在预提取/虚拟帧序列中随机选连续 8 张。可用序列不足 8 张时，在归一化后补零；不再使用全视频均匀取 8 帧的评估方式。
+- 验证/测试沿较长方向两端各裁 10%，再缩放至 `224×224`。训练保留 GenVideo 的来源特例：`real/youku` 沿较长方向两端各裁 15%，其他来源不裁剪；AIGVDBench 依据 record 的 `source` 应用同一判断。
+- 训练共用翻转、JPEG 压缩、噪声、模糊、灰度增强；评估默认不启用训练增强。两者采用相同 ImageNet 均值/方差归一化。`task` 指定的评估攻击也使用同一实现。
+- 这是**策略一致的近似**：FPS 映射不逐帧复现 FFmpeg `-r` 的同步规则；可变帧率视频按 OpenCV 报告的平均 FPS 近似；直接解码不复现落盘 JPG 的有损压缩。因此与历史 JPG 输入不保证逐像素相同。
+- 测试入口默认 `seed: 42`，可在测试 YAML 覆盖。同一 seed、视频顺序和 DataLoader worker/batch 设置可复现随机采样。训练与独立调用 Dataset 时，需由调用方设置随机种子；Albumentations 1.x 还需设置 NumPy 种子。不同 Albumentations 版本之间不保证逐像素相同。
 
-- 修正 Mamba 输入的空间/时间排列，使每个空间块沿时间形成序列。
-- `seed: 42` 固定 Python、NumPy 和 PyTorch 随机种子；不承诺不同硬件上的逐位一致。
-- `train_augment: true` 启用随机水平翻转和 JPEG 压缩（质量 75–100），各以 50% 概率应用。同一视频所有帧共享增强参数，验证和测试不增强。设为 `false` 可做消融。
-- 标签始终为 `0=Real, 1=Fake`，加载时检查标签与来源目录一致。sigmoid 分数 `>=0.5` 判为 Fake。
-- 输出目录为 `results/XCLIP_DeMamba_AIGVDBench_OpenSora_v2`。训练保存配置、每轮预测 CSV、分类别召回率和预测 Fake 比例；学习率调度在 epoch 训练完成后执行。
-- 测试默认使用 Open-Sora＋Real 验证准确率选出的 `best_acc.pth`，准确率并列时保留较早轮次。不能根据 test 分数选择 checkpoint。
-- **必须重新训练。** 新 checkpoint 含 `pipeline_version` 标识，测试拒绝旧版本权重，防止相同参数形状掩盖时空语义变化。
-
-此配置是 Open-Sora 单来源训练、全来源验证监控、同来源 checkpoint 选择、全部来源测试。`aigvdbench_val_sources: all` 控制监控范围，`aigvdbench_checkpoint_sources` 独立限定选择最佳权重的来源。每轮在控制台和结果 TXT 中报告各来源样本数与召回率，并将每个 Fake 来源和 Real 配对计算 AUC/AP。跨域指标仅供观察，不参与梯度、学习率或 checkpoint 选择；全来源验证耗时会增加。与其他方法比较时应保持划分、训练来源和选择 checkpoint 的规则一致，并披露上述预处理与增强。修正不保证跨生成器泛化提升；同来源验证准确率也不代表未见来源效果。
-
-回归检查（需要 PyTorch、OpenCV 和 NumPy）：
+验证数据处理（无需模型权重）：
 
 ```bash
-python -m unittest discover -s tests -v
+NO_ALBUMENTATIONS_UPDATE=1 OMP_NUM_THREADS=1 python -m unittest discover -s tests -v
 ```
 
 使用单独配置启动：
@@ -278,3 +274,12 @@ checkpoint 在测试配置的 `checkpoints` 列表中指定，可添加多个权
 ## 9. 论文与数据集
 
 项目 README 提供论文引用、GenVideo 数据集下载说明及项目背景。数据集本身不包含在本仓库中，使用前请按 README 中的来源和许可获取数据。
+
+
+### 每轮评估指标
+
+训练中的验证阶段会在终端和 `save_dir/Epoch_<编号>_accuracy.txt` 输出整体 AUC、ACC@5%FPR，以及原有的 ACC@0.5。真实视频为负类（0），生成视频为正类（1），分数为生成视频概率。
+
+ACC@5%FPR 在本轮完整评估集的 ROC 上选取 FPR ≤ 0.05 的最宽松阈值，用 `score >= threshold` 判为生成视频，计算 `(TP + TN) / 总视频数`。它不是 TPR/Recall@5%FPR。分数并列或真实样本较少时不插值、不拆分并列样本，实际 FPR 可以低于 5%；报告同时给出实际 FPR、TPR 和阈值。缺少任一类别时，AUC 和该工作点指标报告 NaN。该阈值来自本轮评估集，用于描述本轮 ROC 工作点。
+
+当前 AIGVDBench 配置关闭 `best_acc.pth` 保存，保留 `last.pth` 和 `Epoch_<编号>.pth`。目录中已有的旧 `best_acc.pth` 不会被自动删除。其他配置不设置 `save_best_checkpoint` 时仍保留原有的最佳权重保存行为。

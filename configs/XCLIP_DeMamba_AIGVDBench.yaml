@@ -2,15 +2,13 @@ dataset: 'AIGVDBench'
 aigvdbench_data_root: '/root/misk1024/AIGVDBench'
 aigvdbench_meta_root: '/root/misk1024/AIGVDBench_meta'
 aigvdbench_train_split: 'train'
-aigvdbench_val_split: 'val'
+# Monitor all test sources after each epoch, without best-checkpoint selection.
+aigvdbench_val_split: 'test'
 aigvdbench_train_sources:
   - 'real/real'
   - 'fake/T2V_Open-Sora'
 aigvdbench_val_sources: 'all'
-# Other validation sources are monitoring-only, not checkpoint selection data.
-aigvdbench_checkpoint_sources:
-  - 'real/real'
-  - 'fake/T2V_Open-Sora'
+save_best_checkpoint: false
 
 model: 'XCLIP_DeMamba'
 pretrained_model_path: '/root/misk1024/models/xclip-base-patch16'

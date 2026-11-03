@@ -2,9 +2,11 @@
 
 import argparse
 import csv
+import random
 from pathlib import Path
 
 import cv2
+import numpy as np
 import torch
 import yaml
 from torch.utils.data import DataLoader
@@ -36,6 +38,14 @@ def main():
     if not checkpoint_paths or not isinstance(checkpoint_paths, list):
         raise ValueError("Test configuration must define a non-empty 'checkpoints' list")
 
+    # GenVideo-style evaluation samples a random contiguous window. Fix the
+    # seed so repeated runs with the same loader settings select the same clips.
+    seed = int(cfg.get("seed", 42))
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    loader_generator = torch.Generator().manual_seed(seed)
+
     configured_device = cfg.get("test_device", "auto")
     if configured_device == "auto":
         configured_device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -44,9 +54,10 @@ def main():
         cfg["aigvdbench_data_root"], cfg["aigvdbench_meta_root"], cfg.get("aigvdbench_test_split", "test"), "all"
     )
     loader = DataLoader(
-        AIGVDBenchDataset(records, training=False),
+        AIGVDBenchDataset(records, training=False, task=cfg.get("task", "normal")),
         batch_size=int(cfg.get("test_batch_size", 8)),
         shuffle=False,
+        generator=loader_generator,
         num_workers=int(cfg.get("test_num_workers", 0)),
         pin_memory=device.type == "cuda",
         drop_last=False,
