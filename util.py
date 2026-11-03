@@ -1,4 +1,5 @@
 import models
+from evaluation_metrics import detection_metrics
 import time
 import torch
 import math
@@ -104,7 +105,7 @@ def train_one_epoch(cfg, model, loss_ce, scheduler, optimizer, epochID, max_epoc
             snapshot_path + "/Epoch_" + str(epochID + 1) + ".pth",
         )
 
-        if pred_accuracy > max_acc:
+        if cfg.get("save_best_checkpoint", True) and pred_accuracy > max_acc:
             max_epoch, max_acc = epochID, pred_accuracy
             torch.save(
             {"epoch": epochID + 1, "model_state_dict": model.state_dict()},
@@ -118,15 +119,22 @@ def train_one_epoch(cfg, model, loss_ce, scheduler, optimizer, epochID, max_epoc
             'predicted_prob':outpred
         })
 
+        metrics = detection_metrics(true_labels, outpred)
+        ap = (average_precision_score(true_labels, outpred)
+              if np.any(np.asarray(true_labels) == 1) else float('nan'))
+        summary = (
+            f"ACC@0.5: {pred_accuracy:.4%} | AUC: {metrics['auc']:.4%} | "
+            f"ACC@5%FPR: {metrics['acc_at_fpr']:.4%} | "
+            f"FPR: {metrics['fpr']:.4%} | TPR: {metrics['tpr']:.4%} | "
+            f"threshold: {metrics['threshold']:.9g}"
+        )
+        print(f"Validation epoch {epochID + 1}: {summary}")
         temp_result_txt = snapshot_path+'/Epoch_'+str(epochID + 1)+'_accuracy.txt'
         with open(temp_result_txt, 'w') as file:
-            true_labels = df_result['actual_label']
-            pred_probs = df_result['predicted_prob'] 
-            auc = roc_auc_score(true_labels, pred_probs)
-            ap = average_precision_score(true_labels, pred_probs)
-            file.write(f"总正确率: {pred_accuracy:.2%}\n")
-            file.write(f"AUC是: {auc:.2%}\n")
-            file.write(f"AP是: {ap:.2%}\n")
+            file.write(summary + "\n")
+            file.write(f"AP: {ap:.4%}\n")
+            file.write("ACC@5%FPR uses score >= threshold; real=0, fake=1; "
+                       "threshold is measured on this evaluation split.\n")
 
         if cfg['dataset'] == 'GenVideo':
             prefixes = ["fake/ModelScope", "fake/Morph", "fake/MoonValley",
@@ -174,8 +182,9 @@ def train_one_epoch(cfg, model, loss_ce, scheduler, optimizer, epochID, max_epoc
                     file.write(f"来源: {source_name}, Accuracy: {accuracy:.4f}\n")
 
         print("*****Average Training loss",str(trainLoss),"*****\n")
-        print("*****Epoch", str(epochID), "*****Acc ", str(pred_accuracy), '*****',
-            '\n', "*****Max acc epoch", str(max_epoch), "*****Acc ", str(max_acc), '*****\n')
+        if cfg.get("save_best_checkpoint", True):
+            print(f"Epoch {epochID + 1}: ACC={pred_accuracy:.4%}; "
+                  f"best epoch={max_epoch + 1}, ACC={max_acc:.4%}")
     end_time = time.time()
 
     return max_epoch, max_acc, end_time - ss_time

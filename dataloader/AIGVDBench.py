@@ -1,20 +1,16 @@
 """Data loader for the on-disk AIGVDBench video dataset."""
 
 import json
-import random
 from pathlib import Path
 
 import cv2
-import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
+from .video_processing import prepare_clip, virtual_frame_indices
+
 
 _RECORD_CACHE = {}
-NUM_FRAMES = 8
-IMAGE_SIZE = 224
-IMAGE_MEAN = np.asarray((0.485, 0.456, 0.406), dtype=np.float32)
-IMAGE_STD = np.asarray((0.229, 0.224, 0.225), dtype=np.float32)
 
 
 def _collect_records(data_root, meta_root, split, sources):
@@ -70,59 +66,58 @@ def _collect_records(data_root, meta_root, split, sources):
     return records
 
 
-def _sample_indices(frame_count, count, training):
-    if training:
-        if frame_count >= count:
-            start = random.randint(0, frame_count - count)
-            return list(range(start, start + count))
-        return sorted(random.choices(range(frame_count), k=count))
-    if frame_count >= 2:
-        return np.linspace(0, frame_count - 1, num=count).round().astype(int).tolist()
-    return [0] * count
-
-
-def _read_video_frames(path, training):
+def _read_video_frames(path, training, video_id='', task='normal'):
+    """Emulate GenVideo's extracted JPG sequence without writing images to disk."""
     capture = cv2.VideoCapture(path)
-    if not capture.isOpened():
-        raise RuntimeError(f"OpenCV could not open video: {path}")
+    try:
+        if not capture.isOpened():
+            raise RuntimeError(f"OpenCV could not open video: {path}")
+        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = capture.get(cv2.CAP_PROP_FPS)
+        if frame_count < 1:
+            raise RuntimeError(f"Video has no readable frames: {path}")
+        try:
+            source_indices = virtual_frame_indices(frame_count, fps)
+        except ValueError as exc:
+            raise RuntimeError(f"Invalid video timing for {path}: {exc}") from exc
 
-    video_frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-    if video_frame_count < 1:
+        decoded = {}
+
+        def read_frame(index):
+            frame_index = source_indices[index]
+            if frame_index in decoded:
+                return decoded[frame_index].copy()
+            capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+            ok, frame = capture.read()
+            if not ok or frame is None:
+                raise RuntimeError(f"Could not decode frame {frame_index} from {path}")
+            decoded[frame_index] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            return decoded[frame_index].copy()
+
+        return prepare_clip(
+            len(source_indices), read_frame, training=training,
+            video_id=video_id, task=task,
+        )
+    finally:
         capture.release()
-        raise RuntimeError(f"Video has no readable frames: {path}")
-
-    indices = _sample_indices(video_frame_count, NUM_FRAMES, training)
-    frames = []
-    for frame_index in indices:
-        capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-        ok, frame = capture.read()
-        if not ok or frame is None:
-            capture.release()
-            raise RuntimeError(f"Could not decode frame {frame_index} from {path}")
-
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frame = cv2.resize(frame, (IMAGE_SIZE, IMAGE_SIZE), interpolation=cv2.INTER_LINEAR)
-        frame = frame.astype(np.float32) / 255.0
-        frame = (frame - IMAGE_MEAN) / IMAGE_STD
-        frames.append(torch.from_numpy(frame.transpose(2, 0, 1).copy()))
-
-    capture.release()
-    return torch.stack(frames, dim=0)
 
 
 class AIGVDBenchDataset(Dataset):
     """Return the tensor/label contract consumed by train.py and util.py."""
 
-    def __init__(self, records, training):
+    def __init__(self, records, training, task="normal"):
         self.records = records
         self.training = training
+        self.task = task
 
     def __len__(self):
         return len(self.records)
 
     def __getitem__(self, index):
         record = self.records[index]
-        frames = _read_video_frames(record["path"], self.training)
+        frames = _read_video_frames(
+            record["path"], self.training, video_id=record.get("source", ""), task=self.task,
+        )
         video = frames.unsqueeze(0)  # [1, T, C, H, W]
 
         label = record["label"]
@@ -159,7 +154,7 @@ def generate_dataset_loader(cfg):
         drop_last=False,
     )
     val_loader = DataLoader(
-        AIGVDBenchDataset(val_records, training=False),
+        AIGVDBenchDataset(val_records, training=False, task=cfg.get("task", "normal")),
         batch_size=int(cfg["val_batch_size"]),
         shuffle=False,
         num_workers=workers,
