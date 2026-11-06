@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 import util
+from dataloader.error_handling import collate_video_samples, video_batches
 from dataloader.AIGVDBench import AIGVDBenchDataset, _collect_records
 
 # OpenCV builds differ; silence decoder logs when this API is available.
@@ -61,6 +62,7 @@ def main():
         num_workers=int(cfg.get("test_num_workers", 0)),
         pin_memory=device.type == "cuda",
         drop_last=False,
+        collate_fn=collate_video_samples,
     )
 
     # Keep each checkpoint's model resident so every decoded video batch is
@@ -96,32 +98,14 @@ def main():
         output.parent.mkdir(parents=True, exist_ok=True)
         outputs.append(output)
     rows_by_checkpoint = [[] for _ in models]
-    skipped_batches = []
+    stats = {}
     with torch.inference_mode():
-        loader_iterator = iter(loader)
-        progress = tqdm(total=len(loader), desc="Testing AIGVDBench", unit="batch")
-        for batch_index in range(len(loader)):
-            try:
-                _, video, onehot_labels, _, video_ids = next(loader_iterator)
-            except StopIteration:
-                break
-            except RuntimeError as exc:
-                # A decode error raised inside Dataset.__getitem__ is wrapped
-                # by DataLoader when workers are enabled. Drop that full batch
-                # and keep consuming the remaining batches.
-                error = str(exc)
-                if "DataLoader worker process" not in error and "Could not decode frame" not in error:
-                    raise
-                skipped_batches.append((batch_index + 1, error))
-                progress.update(1)
-                progress.set_postfix(skipped=len(skipped_batches), status="batch skipped")
-                tqdm.write(f"Skipped batch {batch_index + 1}/{len(loader)} due to video decode error: {error}")
-                continue
-
+        for _, video, onehot_labels, _, video_ids in video_batches(
+            loader, output_dir / 'test_video_errors.jsonl', 'Testing', stats=stats,
+        ):
             inputs = video[:, 0].float().to(device, non_blocking=device.type == "cuda")
             actual_labels = onehot_labels.argmax(dim=1).tolist()
             for model_index, model in enumerate(models):
-                progress.set_postfix(checkpoint=Path(checkpoint_paths[model_index]).stem)
                 fake_scores = model(inputs)[:, 0].sigmoid().cpu().tolist()
                 rows = rows_by_checkpoint[model_index]
                 for video_id, fake_score, actual_label in zip(video_ids, fake_scores, actual_labels):
@@ -134,10 +118,6 @@ def main():
                     predicted = "fake" if fake_score >= 0.5 else "real"
                     actual = "fake" if actual_label == 1 else "real"
                     rows.append((source, filename, real_score, fake_score, predicted, actual))
-            progress.update(1)
-            progress.set_postfix(skipped=len(skipped_batches))
-        progress.close()
-
     for rows, output in zip(rows_by_checkpoint, outputs):
         with output.open("w", newline="", encoding="utf-8-sig") as stream:
             writer = csv.writer(stream)
@@ -145,12 +125,7 @@ def main():
             writer.writerows(rows)
         print(f"Exported {len(rows)} video predictions to {output}")
 
-    if skipped_batches:
-        error_log = output_dir / "test_skipped_batches.txt"
-        with error_log.open("w", encoding="utf-8") as stream:
-            for batch_index, error in skipped_batches:
-                stream.write(f"batch {batch_index}: {error}\n\n")
-        print(f"Skipped {len(skipped_batches)} batch(es); details saved to {error_log}")
+    print(f"Test samples: {stats}; errors: {output_dir / 'test_video_errors.jsonl'}")
 
 
 if __name__ == "__main__":

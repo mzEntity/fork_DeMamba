@@ -16,7 +16,6 @@ tuning_mode: 'sft'
 
 save_dir: './results/XCLIP_DeMamba_AIGVDBench_OpenSora_v2'
 seed: 42
-train_augment: true
 
 max_epoch: 10
 

@@ -1,12 +1,14 @@
 """Data loader for the on-disk AIGVDBench video dataset."""
 
 import json
+import traceback
 from pathlib import Path
 
 import cv2
 import torch
 from torch.utils.data import DataLoader, Dataset
 
+from .error_handling import FailedVideo, collate_video_samples
 from .video_processing import prepare_clip, virtual_frame_indices
 
 
@@ -118,18 +120,26 @@ class AIGVDBenchDataset(Dataset):
 
     def __getitem__(self, index):
         record = self.records[index]
-        frames = _read_video_frames(
-            record["path"], self.training, video_id=record.get("source", ""), task=self.task,
-        )
-        video = frames.unsqueeze(0)  # [1, T, C, H, W]
+        try:
+            frames = _read_video_frames(
+                record["path"], self.training, video_id=record.get("source", ""), task=self.task,
+            )
+            if frames.shape != (8, 3, 224, 224) or not torch.isfinite(frames).all():
+                raise ValueError(f"Invalid video tensor: shape={tuple(frames.shape)} or non-finite pixels")
+            video = frames.unsqueeze(0)  # [1, T, C, H, W]
 
-        label = record["label"]
-        onehot = torch.zeros(2, dtype=torch.float32)
-        onehot[label] = 1.0
-        binary_label = torch.tensor([float(label)], dtype=torch.float32)
-        if self.training:
-            return index, video, onehot, binary_label
-        return index, video, onehot, binary_label, record["video_id"]
+            label = record["label"]
+            onehot = torch.zeros(2, dtype=torch.float32)
+            onehot[label] = 1.0
+            binary_label = torch.tensor([float(label)], dtype=torch.float32)
+            if self.training:
+                return index, video, onehot, binary_label
+            return index, video, onehot, binary_label, record["video_id"]
+        except Exception as exc:
+            return FailedVideo(
+                video_id=str(record.get("video_id", index)), path=str(record.get("path", "")),
+                error_type=type(exc).__name__, reason=str(exc), traceback=traceback.format_exc(),
+            )
 
 
 def generate_dataset_loader(cfg):
@@ -149,12 +159,13 @@ def generate_dataset_loader(cfg):
 
     workers = int(cfg["num_workers"])
     train_loader = DataLoader(
-        AIGVDBenchDataset(train_records, training=True, augment=cfg.get('train_augment', False)),
+        AIGVDBenchDataset(train_records, training=True),
         batch_size=int(cfg["train_batch_size"]),
         shuffle=True,
         num_workers=workers,
         pin_memory=True,
         drop_last=False,
+        collate_fn=collate_video_samples,
     )
     val_loader = DataLoader(
         AIGVDBenchDataset(val_records, training=False, task=cfg.get("task", "normal")),
@@ -163,6 +174,7 @@ def generate_dataset_loader(cfg):
         num_workers=workers,
         pin_memory=True,
         drop_last=False,
+        collate_fn=collate_video_samples,
     )
 
     print(

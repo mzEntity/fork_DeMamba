@@ -1,5 +1,7 @@
 import models
 from evaluation_metrics import detection_metrics
+from dataloader.error_handling import video_batches
+from pathlib import Path
 import time
 import torch
 import math
@@ -20,7 +22,8 @@ def checkpoint_accuracy(cfg, video_ids, predictions, labels):
     groups = ['/'.join(str(path).split('/')[1:-1]) for path in video_ids]
     missing = set(sources) - set(groups)
     if missing:
-        raise ValueError(f'Checkpoint selection sources absent from validation: {sorted(missing)}')
+        print(f'Checkpoint selection skipped; sources absent from valid samples: {sorted(missing)}')
+        return float('nan')
     mask = np.asarray([group in sources for group in groups])
     return accuracy_score(np.asarray(labels)[mask], np.asarray(predictions)[mask])
 
@@ -42,6 +45,7 @@ def build_model(cfg):
 
 def eval_model(cfg, model, val_loader, loss_ce, val_batch_size):
     model.eval()
+    device = next(model.parameters()).device
     outpred_list = []
     gt_label_list = []
     video_list = []
@@ -49,15 +53,18 @@ def eval_model(cfg, model, val_loader, loss_ce, val_batch_size):
     lossTrainNorm = 0
     print("******** Start Testing. ********")
 
+    stats = {}
+    epoch = cfg.get('_eval_epoch')
+    error_log = Path(cfg.get('save_dir', './results')) / f'Epoch_{epoch or "standalone"}_validation_errors.jsonl'
     with torch.no_grad():  # No need to track gradients during validation
-        for i, (_, input, target, binary_label, video_id) in enumerate(tqdm(val_loader, desc="Validation", total=len(val_loader))):
+        for i, (_, input, target, binary_label, video_id) in enumerate(video_batches(val_loader, error_log, "Validation", epoch, stats)):
             if i == 0:
                 ss_time = time.time()
             
             input = input[:,0]
-            varInput = torch.autograd.Variable(input.float().cuda())
-            varTarget = torch.autograd.Variable(target.contiguous().cuda())
-            var_Binary_Target = torch.autograd.Variable(binary_label.contiguous().cuda())
+            varInput = torch.autograd.Variable(input.float().to(device))
+            varTarget = torch.autograd.Variable(target.contiguous().to(device))
+            var_Binary_Target = torch.autograd.Variable(binary_label.contiguous().to(device))
 
             logit = model(varInput)
             lossvalue = loss_ce(logit, var_Binary_Target)
@@ -68,6 +75,10 @@ def eval_model(cfg, model, val_loader, loss_ce, val_batch_size):
             gt_label_list.append(varTarget.cpu().detach().numpy())
             video_list.append(video_id)
     
+    cfg['_validation_stats'] = stats
+    if not outpred_list:
+        print("Validation has no valid videos; metrics will be NaN.")
+        return float('nan'), np.array([], dtype=str), [], np.array([], dtype=int), np.array([])
     valLoss = valLoss / lossTrainNorm
 
     outpred = np.concatenate(outpred_list, 0)
@@ -82,18 +93,21 @@ def eval_model(cfg, model, val_loader, loss_ce, val_batch_size):
 
 def train_one_epoch(cfg, model, loss_ce, scheduler, optimizer, epochID, max_epoch, max_acc, train_loader, val_loader, snapshot_path):
     model.train()
+    device = next(model.parameters()).device
     trainLoss = 0
     lossTrainNorm = 0
 
     ss_time = time.time()
-    pbar = tqdm(train_loader, total=len(train_loader), desc=f"Training epoch {epochID + 1}")
+    train_stats = {}
+    pbar = video_batches(train_loader, Path(snapshot_path) / f'Epoch_{epochID + 1}_train_errors.jsonl',
+                         'Training', epochID + 1, train_stats)
     for batchID, (index, input, target, binary_label) in enumerate(pbar):
         if batchID == 0:
             ss_time = time.time()
         input = input[:,0].float()
-        varInput = torch.autograd.Variable(input).cuda()
-        varTarget = torch.autograd.Variable(target.contiguous().cuda())
-        var_Binary_Target = torch.autograd.Variable(binary_label.contiguous().cuda())
+        varInput = torch.autograd.Variable(input).to(device)
+        varTarget = torch.autograd.Variable(target.contiguous().to(device))
+        var_Binary_Target = torch.autograd.Variable(binary_label.contiguous().to(device))
         optimizer.zero_grad()
 
         logit = model(varInput)
@@ -104,16 +118,14 @@ def train_one_epoch(cfg, model, loss_ce, scheduler, optimizer, epochID, max_epoc
 
         trainLoss += lossvalue.item()
         lossTrainNorm += 1
-        pbar.set_postfix(loss=trainLoss / lossTrainNorm)
+        train_stats['loss'] = trainLoss / lossTrainNorm
         del lossvalue
 
-    trainLoss = trainLoss / lossTrainNorm
-    scheduler.step()
+    trainLoss = trainLoss / lossTrainNorm if lossTrainNorm else float('nan')
+    if lossTrainNorm:
+        scheduler.step()
     
     if (epochID+1) % 1 == 0:
-        pred_accuracy, video_id, pred_labels, true_labels, outpred = eval_model(cfg, model, val_loader, loss_ce, cfg['val_batch_size'])    
-        selection_accuracy = checkpoint_accuracy(cfg, video_id, pred_labels, true_labels)
-
         torch.save(
             {"epoch": epochID + 1, "model_state_dict": model.state_dict(), "pipeline_version": PIPELINE_VERSION, "config": cfg},
             snapshot_path + "/last"+ ".pth",
@@ -123,8 +135,14 @@ def train_one_epoch(cfg, model, loss_ce, scheduler, optimizer, epochID, max_epoc
             snapshot_path + "/Epoch_" + str(epochID + 1) + ".pth",
         )
 
-        if cfg.get("save_best_checkpoint", True) and pred_accuracy > max_acc:
-            max_epoch, max_acc = epochID, pred_accuracy
+        eval_cfg = dict(cfg, save_dir=snapshot_path, _eval_epoch=epochID + 1)
+        pred_accuracy, video_id, pred_labels, true_labels, outpred = eval_model(eval_cfg, model, val_loader, loss_ce, cfg['val_batch_size'])
+        selection_accuracy = (checkpoint_accuracy(cfg, video_id, pred_labels, true_labels)
+                              if cfg.get("save_best_checkpoint", True) and len(true_labels) else float("nan"))
+
+
+        if cfg.get("save_best_checkpoint", True) and selection_accuracy > max_acc:
+            max_epoch, max_acc = epochID, selection_accuracy
             torch.save(
             {"epoch": epochID + 1, "model_state_dict": model.state_dict(), "pipeline_version": PIPELINE_VERSION, "config": cfg},
             snapshot_path + "/best_acc"+ ".pth",
@@ -137,7 +155,8 @@ def train_one_epoch(cfg, model, loss_ce, scheduler, optimizer, epochID, max_epoc
             'predicted_prob':outpred
         })
 
-        metrics = detection_metrics(true_labels, outpred)
+        metrics = (detection_metrics(true_labels, outpred) if len(true_labels) else
+                   dict.fromkeys(('auc', 'acc_at_fpr', 'threshold', 'fpr', 'tpr'), float('nan')))
         ap = (average_precision_score(true_labels, outpred)
               if np.any(np.asarray(true_labels) == 1) else float('nan'))
         summary = (
@@ -150,11 +169,13 @@ def train_one_epoch(cfg, model, loss_ce, scheduler, optimizer, epochID, max_epoc
         temp_result_txt = snapshot_path+'/Epoch_'+str(epochID + 1)+'_accuracy.txt'
         with open(temp_result_txt, 'w') as file:
             file.write(summary + "\n")
+            file.write(f"Training samples: {train_stats}\n")
+            file.write(f"Validation samples: {eval_cfg.get('_validation_stats', {})}\n")
             file.write(f"AP: {ap:.4%}\n")
             file.write("ACC@5%FPR uses score >= threshold; real=0, fake=1; "
                        "threshold is measured on this evaluation split.\n")
 
-        if cfg['dataset'] == 'GenVideo':
+        if cfg['dataset'] == 'GenVideo' and len(df_result):
             prefixes = ["fake/ModelScope", "fake/Morph", "fake/MoonValley",
                         "fake/HotShot", "fake/EvalCrafter_T2V_Dataset/show_1",
                         "fake/Sora", "fake/Wild", "fake/VideoCrafter",
@@ -212,7 +233,7 @@ def train_one_epoch(cfg, model, loss_ce, scheduler, optimizer, epochID, max_epoc
         print("*****Average Training loss",str(trainLoss),"*****\n")
         if cfg.get("save_best_checkpoint", True):
             print(f"Epoch {epochID + 1}: ACC={pred_accuracy:.4%}; "
-                  f"best epoch={max_epoch + 1}, ACC={max_acc:.4%}")
+                  f"best epoch={max_epoch + 1}, selection ACC={max_acc:.4%}")
     end_time = time.time()
 
     return max_epoch, max_acc, end_time - ss_time

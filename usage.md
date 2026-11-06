@@ -248,7 +248,7 @@ NO_ALBUMENTATIONS_UPDATE=1 OMP_NUM_THREADS=1 python -m unittest discover -s test
 python train.py --config configs/XCLIP_DeMamba_AIGVDBench.yaml
 ```
 
-若数据放在其它位置，修改配置中的 `aigvdbench_data_root` 和 `aigvdbench_meta_root`。训练/验证 source 分别由 `aigvdbench_train_sources` 和 `aigvdbench_val_sources` 控制，权重位置由 `pretrained_model_path` 控制。训练配置将 DeMamba 原有训练参数保留，epoch 数设为 10；这些路径和 source 配置缺失时会直接报错。每轮结束后会保存 `Epoch_N.pth`、`Epoch_N_accuracy.txt`；同时更新 `last.pth`，并在验证准确率刷新时更新 `best_acc.pth`。
+若数据放在其它位置，修改配置中的 `aigvdbench_data_root` 和 `aigvdbench_meta_root`。训练/验证 source 分别由 `aigvdbench_train_sources` 和 `aigvdbench_val_sources` 控制，权重位置由 `pretrained_model_path` 控制。训练配置将 DeMamba 原有训练参数保留，epoch 数设为 10；这些路径和 source 配置缺失时会直接报错。每轮结束后会保存 `Epoch_N.pth`、`Epoch_N_accuracy.txt`；同时更新 `last.pth`，仅在 `save_best_checkpoint: true` 时按选模来源的准确率更新 `best_acc.pth`；当前配置关闭此功能。
 
 ## 8. 常见运行问题
 
@@ -283,3 +283,14 @@ checkpoint 在测试配置的 `checkpoints` 列表中指定，可添加多个权
 ACC@5%FPR 在本轮完整评估集的 ROC 上选取 FPR ≤ 0.05 的最宽松阈值，用 `score >= threshold` 判为生成视频，计算 `(TP + TN) / 总视频数`。它不是 TPR/Recall@5%FPR。分数并列或真实样本较少时不插值、不拆分并列样本，实际 FPR 可以低于 5%；报告同时给出实际 FPR、TPR 和阈值。缺少任一类别时，AUC 和该工作点指标报告 NaN。该阈值来自本轮评估集，用于描述本轮 ROC 工作点。
 
 当前 AIGVDBench 配置关闭 `best_acc.pth` 保存，保留 `last.pth` 和 `Epoch_<编号>.pth`。目录中已有的旧 `best_acc.pth` 不会被自动删除。其他配置不设置 `save_best_checkpoint` 时仍保留原有的最佳权重保存行为。
+
+合并后配置兼容说明：已移除 AIGVDBench 单独的 `train_augment` 开关；两个数据集训练时固定使用共享的 GenVideo 增强策略。旧配置中该键不再生效。独立测试配置默认读取 `last.pth`，因为当前训练不生成新的 `best_acc.pth`。如启用最佳权重保存，`aigvdbench_checkpoint_sources` 决定选模准确率的统计来源；关闭保存时不检查该选模来源配置。
+
+
+### 损坏视频容错
+
+AIGVDBench 的训练、验证及独立测试现在捕获单视频读取、解码、预处理和样本构造过程中的 Python 异常。失败视频不进入模型和指标；同一 batch 中的正常视频仍继续使用。整批失败时跳过该 batch；整轮没有有效样本时不做无效优化更新，指标报告 NaN。正常视频的抽帧、裁剪和归一化策略不变。
+
+错误由主进程实时追加到 `save_dir/Epoch_N_train_errors.jsonl` 和 `save_dir/Epoch_N_validation_errors.jsonl`；独立测试写入 `test_output_dir/test_video_errors.jsonl`。每条记录包含视频路径、ID、异常类型、原因、堆栈、阶段、epoch、batch 和时间。DataLoader 层面的异常作为失败 batch 另外记录。每轮指标文本附有效视频数、跳过视频数和失败 batch 数，指标仅针对实际成功评估的视频。
+
+`last.pth` 和 `Epoch_N.pth` 改为**训练完成后、验证开始前**保存。验证结果仍在验证完成后写入；验证过程的错误日志实时写入。此容错不保证从系统杀进程、底层库崩溃或硬件故障中恢复，也不隐藏模型/优化器自身的错误。

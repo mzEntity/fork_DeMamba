@@ -8,7 +8,8 @@ import cv2
 import numpy as np
 import torch
 
-from dataloader.AIGVDBench import AIGVDBenchDataset, _sample_indices
+from dataloader.AIGVDBench import AIGVDBenchDataset
+from dataloader.video_processing import sample_frame_indices
 
 
 spec = importlib.util.spec_from_file_location(
@@ -48,18 +49,15 @@ class TemporalTests(unittest.TestCase):
 
 
 class SamplingTests(unittest.TestCase):
-    def test_clip_coverage_and_short_clips(self):
-        random.seed(42)
+    def test_contiguous_clip_and_short_sequences(self):
         for length in (1, 3, 8, 37, 240):
-            for training in (False, True):
-                indices = _sample_indices(length, 8, training)
-                self.assertEqual(len(indices), 8)
-                self.assertEqual(indices, sorted(indices))
-                self.assertTrue(all(0 <= i < length for i in indices))
-                if length >= 8:
-                    for bin_id, index in enumerate(indices):
-                        self.assertTrue(bin_id*length//8 <= index < (bin_id+1)*length//8)
-            self.assertEqual(_sample_indices(length, 8, False), _sample_indices(length, 8, False))
+            random.seed(42)
+            indices = sample_frame_indices(length)
+            self.assertEqual(len(indices), min(length, 8))
+            self.assertEqual(indices, list(range(indices[0], indices[0] + len(indices))))
+            self.assertTrue(all(0 <= i < length for i in indices))
+            random.seed(42)
+            self.assertEqual(indices, sample_frame_indices(length))
 
     def test_video_tensor_and_labels(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -72,7 +70,7 @@ class SamplingTests(unittest.TestCase):
             for label in (0, 1):
                 records = [{'path': path, 'label': label, 'video_id': 'test/clip'}]
                 for training in (False, True):
-                    result = AIGVDBenchDataset(records, training, augment=True)[0]
+                    result = AIGVDBenchDataset(records, training)[0]
                     self.assertEqual(result[1].shape, (1, 8, 3, 224, 224))
                     self.assertTrue(torch.isfinite(result[1]).all())
                     self.assertEqual(result[2].argmax().item(), label)

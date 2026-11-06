@@ -8,7 +8,7 @@ model: 'XCLIP_DeMamba'
 pretrained_model_path: '/root/misk1024/models/xclip-base-patch16'
 
 checkpoints:
-  - './results/XCLIP_DeMamba_AIGVDBench_OpenSora_v2/best_acc.pth'
+  - './results/XCLIP_DeMamba_AIGVDBench_OpenSora_v2/last.pth'
 
 test_batch_size: 4
 test_num_workers: 4
